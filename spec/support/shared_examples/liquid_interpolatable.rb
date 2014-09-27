@@ -9,7 +9,9 @@ shared_examples_for LiquidInterpolatable do
       "escape" => "This should be {{hello_world | uri_escape}}"
     }
 
-    @checker = described_class.new(:name => "somename", :options => @valid_params)
+    @checker = new_instance
+    @checker.name = "somename"
+    @checker.options = @valid_params
     @checker.user = users(:jane)
 
     @event = Event.new
@@ -20,7 +22,7 @@ shared_examples_for LiquidInterpolatable do
 
   describe "interpolating liquid templates" do
     it "should work" do
-      @checker.interpolate_options(@checker.options, @event.payload).should == {
+      @checker.interpolate_options(@checker.options, @event).should == {
           "normal" => "just some normal text",
           "variable" => "hello",
           "text" => "Some test with an embedded hello",
@@ -30,7 +32,7 @@ shared_examples_for LiquidInterpolatable do
 
     it "should work with arrays", focus: true do
       @checker.options = {"value" => ["{{variable}}", "Much array", "Hey, {{hello_world}}"]}
-      @checker.interpolate_options(@checker.options, @event.payload).should == {
+      @checker.interpolate_options(@checker.options, @event).should == {
         "value" => ["hello", "Much array", "Hey, Hello world"]
       }
     end
@@ -38,7 +40,7 @@ shared_examples_for LiquidInterpolatable do
     it "should work recursively" do
       @checker.options['hash'] = {'recursive' => "{{variable}}"}
       @checker.options['indifferent_hash'] = ActiveSupport::HashWithIndifferentAccess.new({'recursive' => "{{variable}}"})
-      @checker.interpolate_options(@checker.options, @event.payload).should == {
+      @checker.interpolate_options(@checker.options, @event).should == {
           "normal" => "just some normal text",
           "variable" => "hello",
           "text" => "Some test with an embedded hello",
@@ -49,8 +51,37 @@ shared_examples_for LiquidInterpolatable do
     end
 
     it "should work for strings" do
-      @checker.interpolate_string("{{variable}}", @event.payload).should == "hello"
-      @checker.interpolate_string("{{variable}} you", @event.payload).should == "hello you"
+      @checker.interpolate_string("{{variable}}", @event).should == "hello"
+      @checker.interpolate_string("{{variable}} you", @event).should == "hello you"
+    end
+
+    it "should use local variables while in a block" do
+      @checker.options['locals'] = '{{_foo_}} {{_bar_}}'
+
+      @checker.interpolation_context.tap { |context|
+        @checker.interpolated['locals'].should == ' '
+
+        context.stack {
+          context['_foo_'] = 'This is'
+          context['_bar_'] = 'great.'
+
+          @checker.interpolated['locals'].should == 'This is great.'
+        }
+
+        @checker.interpolated['locals'].should == ' '
+      }
+    end
+
+    it "should use another self object while in a block" do
+      @checker.options['properties'] = '{{_foo_}} {{_bar_}}'
+
+      @checker.interpolated['properties'].should == ' '
+
+      @checker.interpolate_with({ '_foo_' => 'That was', '_bar_' => 'nice.' }) {
+        @checker.interpolated['properties'].should == 'That was nice.'
+      }
+
+      @checker.interpolated['properties'].should == ' '
     end
   end
 

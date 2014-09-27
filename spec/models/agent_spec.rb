@@ -132,6 +132,13 @@ describe Agent do
       it_behaves_like HasGuid
     end
 
+    describe ".short_type" do
+      it "returns a short name without 'Agents::'" do
+        Agents::SomethingSource.new.short_type.should == "SomethingSource"
+        Agents::CannotBeScheduled.new.short_type.should == "CannotBeScheduled"
+      end
+    end
+
     describe ".default_schedule" do
       it "stores the default on the class" do
         Agents::SomethingSource.default_schedule.should == "2pm"
@@ -206,7 +213,7 @@ describe Agent do
         @checker.last_check_at.should be_nil
         Agents::SomethingSource.async_check(@checker.id)
         @checker.reload.last_check_at.should be_within(2).of(Time.now)
-        @checker.reload.options[:new].should be_true # Show that we save options
+        @checker.reload.options[:new].should be_truthy # Show that we save options
       end
 
       it "should log exceptions" do
@@ -479,7 +486,7 @@ describe Agent do
         agent.errors_on(:options).should include("cannot be set to an instance of Fixnum")
       end
 
-      it "should not allow agents owned by other people" do
+      it "should not allow source agents owned by other people" do
         agent = Agents::SomethingSource.new(:name => "something")
         agent.user = users(:bob)
         agent.source_ids = [agents(:bob_weather_agent).id]
@@ -488,6 +495,28 @@ describe Agent do
         agent.should have(1).errors_on(:sources)
         agent.user = users(:jane)
         agent.should have(0).errors_on(:sources)
+      end
+
+      it "should not allow controller agents owned by other people" do
+        agent = Agents::SomethingSource.new(:name => "something")
+        agent.user = users(:bob)
+        agent.controller_ids = [agents(:bob_weather_agent).id]
+        agent.should have(0).errors_on(:controllers)
+        agent.controller_ids = [agents(:jane_weather_agent).id]
+        agent.should have(1).errors_on(:controllers)
+        agent.user = users(:jane)
+        agent.should have(0).errors_on(:controllers)
+      end
+
+      it "should not allow control target agents owned by other people" do
+        agent = Agents::CannotBeScheduled.new(:name => "something")
+        agent.user = users(:bob)
+        agent.control_target_ids = [agents(:bob_weather_agent).id]
+        agent.should have(0).errors_on(:control_targets)
+        agent.control_target_ids = [agents(:jane_weather_agent).id]
+        agent.should have(1).errors_on(:control_targets)
+        agent.user = users(:jane)
+        agent.should have(0).errors_on(:control_targets)
       end
 
       it "should not allow scenarios owned by other people" do
@@ -727,5 +756,153 @@ describe Agent do
         event.expires_at.should be_nil
       end
     end
+  end
+
+  describe '.last_checked_event_id' do
+    it "should be updated by setting drop_pending_events to true" do
+      agent = agents(:bob_rain_notifier_agent)
+      agent.last_checked_event_id = nil
+      agent.save!
+      agent.update!(drop_pending_events: true)
+      agent.reload.last_checked_event_id.should == Event.maximum(:id)
+    end
+
+    it "should not affect a virtual attribute drop_pending_events" do
+      agent = agents(:bob_rain_notifier_agent)
+      agent.update!(drop_pending_events: true)
+      agent.reload.drop_pending_events.should == false
+    end
+  end
+
+  describe ".drop_pending_events" do
+    before do
+      stub_request(:any, /wunderground/).to_return(body: File.read(Rails.root.join("spec/data_fixtures/weather.json")), status: 200)
+      stub.any_instance_of(Agents::WeatherAgent).is_tomorrow?(anything) { true }
+    end
+
+    it "should drop pending events while the agent was disabled when set to true" do
+      agent1 = agents(:bob_weather_agent)
+      agent2 = agents(:bob_rain_notifier_agent)
+
+      -> {
+        -> {
+          Agent.async_check(agent1.id)
+          Agent.receive!
+        }.should change { agent1.events.count }.by(1)
+      }.should change { agent2.events.count }.by(1)
+
+      agent2.disabled = true
+      agent2.save!
+
+      -> {
+        -> {
+          Agent.async_check(agent1.id)
+          Agent.receive!
+        }.should change { agent1.events.count }.by(1)
+      }.should_not change { agent2.events.count }
+
+      agent2.disabled = false
+      agent2.drop_pending_events = true
+      agent2.save!
+
+      -> {
+        Agent.receive!
+      }.should_not change { agent2.events.count }
+    end
+  end
+end
+
+describe AgentDrop do
+  def interpolate(string, agent)
+    agent.interpolate_string(string, "agent" => agent)
+  end
+
+  before do
+    @wsa1 = Agents::WebsiteAgent.new(
+      name: 'XKCD',
+      options: {
+        expected_update_period_in_days: 2,
+        type: 'html',
+        url: 'http://xkcd.com/',
+        mode: 'on_change',
+        extract: {
+          url: { css: '#comic img', value: '@src' },
+          title: { css: '#comic img', value: '@alt' },
+        },
+      },
+      schedule: 'every_1h',
+      keep_events_for: 2)
+    @wsa1.user = users(:bob)
+    @wsa1.save!
+
+    @wsa2 = Agents::WebsiteAgent.new(
+      name: 'Dilbert',
+      options: {
+        expected_update_period_in_days: 2,
+        type: 'html',
+        url: 'http://dilbert.com/',
+        mode: 'on_change',
+        extract: {
+          url: { css: '[id^=strip_enlarged_] img', value: '@src' },
+          title: { css: '.STR_DateStrip', value: './/text()' },
+        },
+      },
+      schedule: 'every_12h',
+      keep_events_for: 2)
+    @wsa2.user = users(:bob)
+    @wsa2.save!
+
+    @efa = Agents::EventFormattingAgent.new(
+      name: 'Formatter',
+      options: {
+        instructions: {
+          message: '{{agent.name}}: {{title}} {{url}}',
+          agent: '{{agent.type}}',
+        },
+        mode: 'clean',
+        matchers: [],
+        skip_created_at: 'false',
+      },
+      keep_events_for: 2,
+      propagate_immediately: true)
+    @efa.user = users(:bob)
+    @efa.sources << @wsa1 << @wsa2
+    @efa.memory[:test] = 1
+    @efa.save!
+  end
+
+  it 'should be created via Agent#to_liquid' do
+    @wsa1.to_liquid.class.should be(AgentDrop)
+    @wsa2.to_liquid.class.should be(AgentDrop)
+    @efa.to_liquid.class.should be(AgentDrop)
+  end
+
+  it 'should have .type and .name' do
+    t = '{{agent.type}}: {{agent.name}}'
+    interpolate(t, @wsa1).should eq('WebsiteAgent: XKCD')
+    interpolate(t, @wsa2).should eq('WebsiteAgent: Dilbert')
+    interpolate(t, @efa).should eq('EventFormattingAgent: Formatter')
+  end
+
+  it 'should have .options' do
+    t = '{{agent.options.url}}'
+    interpolate(t, @wsa1).should eq('http://xkcd.com/')
+    interpolate(t, @wsa2).should eq('http://dilbert.com/')
+    interpolate('{{agent.options.instructions.message}}',
+                @efa).should eq('{{agent.name}}: {{title}} {{url}}')
+  end
+
+  it 'should have .sources' do
+    t = '{{agent.sources.size}}: {{agent.sources | map:"name" | join:", "}}'
+    interpolate(t, @wsa1).should eq('0: ')
+    interpolate(t, @wsa2).should eq('0: ')
+    interpolate(t, @efa).should eq('2: XKCD, Dilbert')
+  end
+
+  it 'should have .receivers' do
+    t = '{{agent.receivers.size}}: {{agent.receivers | map:"name" | join:", "}}'
+    interpolate(t, @wsa1).should eq('1: Formatter')
+    interpolate(t, @wsa2).should eq('1: Formatter')
+    interpolate(t, @efa).should eq('0: ')
   end
 end

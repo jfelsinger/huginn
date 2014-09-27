@@ -1,11 +1,15 @@
 module Agents
   class SlackAgent < Agent
+    DEFAULT_WEBHOOK = 'incoming-webhook'
+    DEFAULT_USERNAME = 'Huginn'
+
     cannot_be_scheduled!
     cannot_create_events!
 
-    DEFAULT_WEBHOOK = 'incoming-webhook'
-    DEFAULT_USERNAME = 'Huginn'
+    gem_dependency_check { defined?(Slack) }
+
     description <<-MD
+      #{'## Include `slack-notifier` in your Gemfile to use this Agent!' if dependencies_missing?}
       The SlackAgent lets you receive events and send notifications to [slack](https://slack.com/).
 
       To get started, you will first need to setup an incoming webhook.
@@ -57,7 +61,7 @@ module Agents
 
     def receive(incoming_events)
       incoming_events.each do |event|
-        opts = interpolated(event.payload)
+        opts = interpolated(event)
         slack_notifier.ping opts[:message], channel: opts[:channel], username: opts[:username]
       end
     end

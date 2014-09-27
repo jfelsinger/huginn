@@ -14,7 +14,7 @@ describe AgentsController do
     it "only returns Agents for the current user" do
       sign_in users(:bob)
       get :index
-      assigns(:agents).all? {|i| i.user.should == users(:bob) }.should be_true
+      assigns(:agents).all? {|i| i.user.should == users(:bob) }.should be_truthy
     end
   end
 
@@ -250,6 +250,18 @@ describe AgentsController do
         post :update, :id => agents(:bob_website_agent).to_param, :agent => valid_attributes(:name => "New name"), :return => "javascript:alert(1)"
         response.should redirect_to(agents_path)
       end
+    end
+
+    it "updates last_checked_event_id when drop_pending_events is given" do
+      sign_in users(:bob)
+      agent = agents(:bob_website_agent)
+      agent.disabled = true
+      agent.last_checked_event_id = nil
+      agent.save!
+      post :update, id: agents(:bob_website_agent).to_param, agent: { disabled: 'false', drop_pending_events: 'true' }
+      agent.reload
+      agent.disabled.should == false
+      agent.last_checked_event_id.should == Event.maximum(:id)
     end
   end
 
